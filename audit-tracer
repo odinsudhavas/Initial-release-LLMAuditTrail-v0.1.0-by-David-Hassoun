@@ -10,15 +10,114 @@ import json
 import uuid
 import sqlite3
 import threading
-from typing import Dict, Any, Optional, List, Tuple
+import hashlib
+import hmac
+import logging
+from typing import Dict, Any, Optional, List, Tuple, Union
 from pathlib import Path
-from .crypto_engine import CryptoEngine
-from .replay_engine import ReplayEngine
-from .compliance_manager import ComplianceManager
+
+
+# Configuration du logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+
+class CryptoEngine:
+    """Moteur cryptographique pour l'intégrité des événements."""
+    
+    def __init__(self, crypto_key: Optional[str] = None):
+        self.key = crypto_key or self._generate_key()
+    
+    def _generate_key(self) -> str:
+        """Génère une clé cryptographique aléatoire."""
+        return hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()
+    
+    def hash_event(self, event: Dict[str, Any]) -> str:
+        """Génère un hash HMAC-SHA256 pour un événement."""
+        event_str = json.dumps(event, sort_keys=True)
+        return hmac.new(
+            self.key.encode(),
+            event_str.encode(),
+            hashlib.sha256
+        ).hexdigest()
+    
+    def calculate_merkle_root(self, hashes: List[str]) -> str:
+        """Calcule la racine de Merkle pour une liste de hashes."""
+        if not hashes:
+            return ""
+        if len(hashes) == 1:
+            return hashes[0]
+        
+        # Implémentation simple de l'arbre de Merkle
+        while len(hashes) > 1:
+            next_level = []
+            for i in range(0, len(hashes), 2):
+                if i + 1 < len(hashes):
+                    combined = hashes[i] + hashes[i + 1]
+                else:
+                    combined = hashes[i] + hashes[i]
+                next_level.append(hashlib.sha256(combined.encode()).hexdigest())
+            hashes = next_level
+        
+        return hashes[0]
+
+
+class ComplianceManager:
+    """Gestionnaire de conformité pour différents standards."""
+    
+    def __init__(self, compliance_mode: Optional[str] = None):
+        self.compliance_mode = compliance_mode or "general"
+        self.supported_modes = ["medical", "financial", "general"]
+        
+        if self.compliance_mode not in self.supported_modes:
+            raise ValueError(f"Unsupported compliance mode: {self.compliance_mode}")
+    
+    def get_interaction_metadata(self) -> Dict[str, Any]:
+        """Retourne les métadonnées de conformité pour une interaction."""
+        return {
+            "compliance_mode": self.compliance_mode,
+            "timestamp": time.time(),
+            "retention_required": self.compliance_mode in ["medical", "financial"]
+        }
+    
+    def generate_report_metadata(self, events: List[Dict], retention_years: int) -> Dict[str, Any]:
+        """Génère les métadonnées pour un rapport de conformité."""
+        return {
+            "compliance_standard": self.compliance_mode,
+            "retention_period_years": retention_years,
+            "total_interactions": len([e for e in events if e.get("event_type") == "llm_interaction"]),
+            "audit_period": {
+                "start": min(e.get("timestamp", 0) for e in events) if events else 0,
+                "end": max(e.get("timestamp", 0) for e in events) if events else 0
+            }
+        }
+
+
+class ReplayEngine:
+    """Moteur de rejeu pour l'analyse des sessions."""
+    
+    def __init__(self, events: List[Dict], crypto_engine: CryptoEngine):
+        self.events = events
+        self.crypto_engine = crypto_engine
+    
+    def replay_session(self) -> Dict[str, Any]:
+        """Rejoue une session complète."""
+        return {
+            "total_events": len(self.events),
+            "session_duration": self._calculate_duration(),
+            "interaction_count": len([e for e in self.events if e.get("event_type") == "llm_interaction"])
+        }
+    
+    def _calculate_duration(self) -> float:
+        """Calcule la durée de la session."""
+        if len(self.events) < 2:
+            return 0.0
+        timestamps = [e.get("timestamp", 0) for e in self.events]
+        return max(timestamps) - min(timestamps)
 
 
 class AuditTracer:
-    """Main interface for cryptographic auditing of LLM agent interactions."""
+    """Interface principale pour l'audit cryptographique des interactions LLM."""
     
     def __init__(
         self,
@@ -29,14 +128,14 @@ class AuditTracer:
         crypto_key: Optional[str] = None
     ):
         """
-        Initialize AuditTracer with compliance configuration.
+        Initialise AuditTracer avec la configuration de conformité.
         
         Args:
-            session_id: Unique session identifier
-            storage_path: Directory for audit log storage
-            compliance_mode: "medical", "financial", or "general"
-            retention_years: Data retention period
-            crypto_key: Custom cryptographic key (auto-generated if None)
+            session_id: Identifiant unique de session
+            storage_path: Répertoire pour le stockage des logs d'audit
+            compliance_mode: "medical", "financial", ou "general"
+            retention_years: Période de rétention des données
+            crypto_key: Clé cryptographique personnalisée (auto-générée si None)
         """
         self.session_id = session_id or str(uuid.uuid4())
         self.storage_path = Path(storage_path)
@@ -44,49 +143,58 @@ class AuditTracer:
         self.compliance_mode = compliance_mode
         self.retention_years = retention_years
         
-        # Initialize core components
-        self.crypto_engine = CryptoEngine(crypto_key=crypto_key)
-        self.compliance_manager = ComplianceManager(compliance_mode)
+        # Initialisation des composants principaux
+        try:
+            self.crypto_engine = CryptoEngine(crypto_key=crypto_key)
+            self.compliance_manager = ComplianceManager(compliance_mode)
+        except Exception as e:
+            logger.error(f"Error initializing components: {e}")
+            raise
         
-        # Database connection
+        # Connexion à la base de données
         self.db_path = self.storage_path / f"{self.session_id}.db"
         self._init_database()
         
-        # Thread safety
+        # Sécurité des threads
         self._lock = threading.RLock()
         self._active_session = False
 
     def _init_database(self):
-        """Initialize SQLite database for audit storage."""
-        conn = sqlite3.connect(str(self.db_path))
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS audit_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                event_id TEXT UNIQUE NOT NULL,
-                session_id TEXT NOT NULL,
-                timestamp REAL NOT NULL,
-                event_type TEXT NOT NULL,
-                data TEXT NOT NULL,
-                hash TEXT NOT NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        conn.commit()
-        conn.close()
+        """Initialise la base de données SQLite pour le stockage d'audit."""
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            conn.execute('''
+                CREATE TABLE IF NOT EXISTS audit_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    event_id TEXT UNIQUE NOT NULL,
+                    session_id TEXT NOT NULL,
+                    timestamp REAL NOT NULL,
+                    event_type TEXT NOT NULL,
+                    data TEXT NOT NULL,
+                    hash TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            ''')
+            conn.commit()
+            conn.close()
+            logger.info(f"Database initialized: {self.db_path}")
+        except sqlite3.Error as e:
+            logger.error(f"Error initializing database: {e}")
+            raise
 
     def wrap_client(self, client):
-        """Wrap LLM client to enable automatic interaction tracing."""
+        """Encapsule le client LLM pour activer le traçage automatique des interactions."""
         if hasattr(client, 'chat') and hasattr(client.chat, 'completions'):
             return OpenAIInterceptor(client, self)
         else:
             raise ValueError(f"Unsupported client type: {type(client)}")
 
     def audit_session(self):
-        """Context manager for audit session lifecycle."""
+        """Gestionnaire de contexte pour le cycle de vie de la session d'audit."""
         return AuditSessionContext(self)
 
     def log_event(self, event_type: str, data: Dict[str, Any]) -> str:
-        """Log event with cryptographic hash for integrity verification."""
+        """Enregistre un événement avec hash cryptographique pour vérification d'intégrité."""
         with self._lock:
             event = {
                 "event_id": str(uuid.uuid4()),
@@ -96,138 +204,164 @@ class AuditTracer:
                 "data": data
             }
             
-            # Generate cryptographic hash
-            event_hash = self.crypto_engine.hash_event(event)
-            event["hash"] = event_hash
-            
-            # Store in database
-            conn = sqlite3.connect(str(self.db_path))
-            conn.execute('''
-                INSERT INTO audit_events
-                (event_id, session_id, timestamp, event_type, data, hash)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (
-                event["event_id"],
-                event["session_id"],
-                event["timestamp"],
-                event["event_type"],
-                json.dumps(event["data"]),
-                event["hash"]
-            ))
-            conn.commit()
-            conn.close()
-            
-            return event["event_id"]
+            try:
+                # Génération du hash cryptographique
+                event_hash = self.crypto_engine.hash_event(event)
+                event["hash"] = event_hash
+                
+                # Stockage en base de données
+                conn = sqlite3.connect(str(self.db_path))
+                conn.execute('''
+                    INSERT INTO audit_events
+                    (event_id, session_id, timestamp, event_type, data, hash)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                ''', (
+                    event["event_id"],
+                    event["session_id"],
+                    event["timestamp"],
+                    event["event_type"],
+                    json.dumps(event["data"]),
+                    event["hash"]
+                ))
+                conn.commit()
+                conn.close()
+                
+                logger.debug(f"Event logged: {event['event_id']}")
+                return event["event_id"]
+                
+            except Exception as e:
+                logger.error(f"Error logging event: {e}")
+                raise
 
     def log_llm_interaction(
         self,
         provider: str,
         model: str,
         messages: List[Dict],
-        response: Dict,
+        response: Union[Dict, Any],
         metadata: Optional[Dict] = None
     ) -> str:
-        """Log LLM API interaction with complete context."""
+        """Enregistre une interaction LLM API avec le contexte complet."""
+        # Conversion sécurisée de la réponse
+        if hasattr(response, 'model_dump'):
+            response_dict = response.model_dump()
+        elif hasattr(response, '__dict__'):
+            response_dict = response.__dict__
+        else:
+            response_dict = dict(response) if response else {}
+        
         interaction_data = {
             "provider": provider,
             "model": model,
             "messages": messages,
-            "response": response,
-            "token_usage": response.get("usage", {}),
+            "response": response_dict,
+            "token_usage": response_dict.get("usage", {}),
             "latency_ms": metadata.get("latency_ms", 0) if metadata else 0,
             "compliance_metadata": self.compliance_manager.get_interaction_metadata()
         }
         return self.log_event("llm_interaction", interaction_data)
 
     def export_compliance_report(self) -> Dict[str, Any]:
-        """Export comprehensive audit trail for compliance reporting."""
-        events = self._get_all_events()
-        
-        # Verify cryptographic integrity
-        integrity_valid, verification_details = self.verify_integrity()
-        
-        # Generate compliance-specific metadata
-        compliance_metadata = self.compliance_manager.generate_report_metadata(
-            events, self.retention_years
-        )
-        
-        return {
-            "session_id": self.session_id,
-            "export_timestamp": time.time(),
-            "total_events": len(events),
-            "integrity_verified": integrity_valid,
-            "verification_details": verification_details,
-            "compliance_metadata": compliance_metadata,
-            "events": events,
-            "framework_info": {
-                "name": "LLMAuditTrail",
-                "version": "0.1.0",
-                "author": "David Hassoun"
+        """Exporte un rapport de conformité complet pour l'audit."""
+        try:
+            events = self._get_all_events()
+            
+            # Vérification de l'intégrité cryptographique
+            integrity_valid, verification_details = self.verify_integrity()
+            
+            # Génération des métadonnées spécifiques à la conformité
+            compliance_metadata = self.compliance_manager.generate_report_metadata(
+                events, self.retention_years
+            )
+            
+            return {
+                "session_id": self.session_id,
+                "export_timestamp": time.time(),
+                "total_events": len(events),
+                "integrity_verified": integrity_valid,
+                "verification_details": verification_details,
+                "compliance_metadata": compliance_metadata,
+                "events": events,
+                "framework_info": {
+                    "name": "LLMAuditTrail",
+                    "version": "0.1.0",
+                    "author": "David Hassoun"
+                }
             }
-        }
+        except Exception as e:
+            logger.error(f"Error exporting compliance report: {e}")
+            raise
 
     def verify_integrity(self) -> Tuple[bool, Dict[str, Any]]:
-        """Verify cryptographic integrity of complete audit trail."""
-        events = self._get_all_events()
-        if not events:
-            return True, {"message": "No events to verify"}
-        
-        verification_results = []
-        for event in events:
-            # Reconstruct event without hash for verification
-            event_data = {
-                "event_id": event["event_id"],
-                "session_id": event["session_id"],
-                "timestamp": event["timestamp"],
-                "event_type": event["event_type"],
-                "data": json.loads(event["data"]) if isinstance(event["data"], str) else event["data"]
+        """Vérifie l'intégrité cryptographique du trail d'audit complet."""
+        try:
+            events = self._get_all_events()
+            if not events:
+                return True, {"message": "No events to verify"}
+            
+            verification_results = []
+            for event in events:
+                # Reconstruction de l'événement sans hash pour vérification
+                event_data = {
+                    "event_id": event["event_id"],
+                    "session_id": event["session_id"],
+                    "timestamp": event["timestamp"],
+                    "event_type": event["event_type"],
+                    "data": json.loads(event["data"]) if isinstance(event["data"], str) else event["data"]
+                }
+                
+                expected_hash = self.crypto_engine.hash_event(event_data)
+                is_valid = event["hash"] == expected_hash
+                
+                verification_results.append({
+                    "event_id": event["event_id"],
+                    "hash_valid": is_valid,
+                    "timestamp": event["timestamp"]
+                })
+            
+            all_valid = all(result["hash_valid"] for result in verification_results)
+            
+            # Calcul de la racine de Merkle pour vérification supplémentaire
+            event_hashes = [event["hash"] for event in events]
+            merkle_root = self.crypto_engine.calculate_merkle_root(event_hashes)
+            
+            return all_valid, {
+                "total_events": len(events),
+                "valid_events": sum(1 for r in verification_results if r["hash_valid"]),
+                "verification_results": verification_results,
+                "merkle_root": merkle_root,
+                "crypto_algorithm": "HMAC-SHA256"
             }
-            
-            expected_hash = self.crypto_engine.hash_event(event_data)
-            is_valid = event["hash"] == expected_hash
-            
-            verification_results.append({
-                "event_id": event["event_id"],
-                "hash_valid": is_valid,
-                "timestamp": event["timestamp"]
-            })
-        
-        all_valid = all(result["hash_valid"] for result in verification_results)
-        
-        # Calculate Merkle root for additional verification
-        event_hashes = [event["hash"] for event in events]
-        merkle_root = self.crypto_engine.calculate_merkle_root(event_hashes)
-        
-        return all_valid, {
-            "total_events": len(events),
-            "valid_events": sum(1 for r in verification_results if r["hash_valid"]),
-            "verification_results": verification_results,
-            "merkle_root": merkle_root,
-            "crypto_algorithm": "HMAC-SHA256"
-        }
+        except Exception as e:
+            logger.error(f"Error verifying integrity: {e}")
+            return False, {"error": str(e)}
 
     def create_replay_engine(self, target_session_id: Optional[str] = None) -> ReplayEngine:
-        """Create replay engine for session analysis."""
+        """Crée un moteur de rejeu pour l'analyse de session."""
         session_id = target_session_id or self.session_id
         events = self._get_all_events(session_id)
         return ReplayEngine(events, self.crypto_engine)
 
     def _get_all_events(self, session_id: Optional[str] = None) -> List[Dict]:
-        """Retrieve all events for specified session."""
+        """Récupère tous les événements pour la session spécifiée."""
         target_session = session_id or self.session_id
-        conn = sqlite3.connect(str(self.db_path))
-        conn.row_factory = sqlite3.Row
-        cursor = conn.execute(
-            'SELECT * FROM audit_events WHERE session_id = ? ORDER BY timestamp',
-            (target_session,)
-        )
-        events = [dict(row) for row in cursor.fetchall()]
-        conn.close()
-        return events
+        try:
+            conn = sqlite3.connect(str(self.db_path))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(
+                'SELECT * FROM audit_events WHERE session_id = ? ORDER BY timestamp',
+                (target_session,)
+            )
+            events = [dict(row) for row in cursor.fetchall()]
+            conn.close()
+            return events
+        except sqlite3.Error as e:
+            logger.error(f"Error retrieving events: {e}")
+            return []
 
 
 class AuditSessionContext:
-    """Context manager for audit session lifecycle."""
+    """Gestionnaire de contexte pour le cycle de vie de la session d'audit."""
     
     def __init__(self, tracer: AuditTracer):
         self.tracer = tracer
@@ -244,39 +378,40 @@ class AuditSessionContext:
         return self.tracer
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        duration = time.time() - self.start_time
-        self.tracer.log_event("session_end", {
-            "duration_seconds": duration,
-            "exception_occurred": exc_type is not None,
-            "total_events": len(self.tracer._get_all_events())
-        })
+        if self.start_time:
+            duration = time.time() - self.start_time
+            self.tracer.log_event("session_end", {
+                "duration_seconds": duration,
+                "exception_occurred": exc_type is not None,
+                "total_events": len(self.tracer._get_all_events())
+            })
         self.tracer._active_session = False
 
 
 class OpenAIInterceptor:
-    """Transparent interceptor for OpenAI client API calls."""
+    """Intercepteur transparent pour les appels API du client OpenAI."""
     
     def __init__(self, client, tracer: AuditTracer):
         self._client = client
         self._tracer = tracer
         
-        # Preserve original client interface
+        # Préservation de l'interface client originale
         for attr in dir(client):
             if not attr.startswith('_') and attr != 'chat':
                 setattr(self, attr, getattr(client, attr))
         
-        # Wrap chat completions
+        # Encapsulation des completions de chat
         self.chat = ChatCompletionsWrapper(client.chat, tracer)
 
 
 class ChatCompletionsWrapper:
-    """Wrapper for OpenAI chat completions with audit logging."""
+    """Wrapper pour les completions de chat OpenAI avec logging d'audit."""
     
     def __init__(self, chat, tracer):
         self._chat = chat
         self._tracer = tracer
         
-        # Preserve original interface
+        # Préservation de l'interface originale
         for attr in dir(chat):
             if not attr.startswith('_') and attr != 'completions':
                 setattr(self, attr, getattr(chat, attr))
@@ -285,40 +420,41 @@ class ChatCompletionsWrapper:
 
 
 class CompletionsWrapper:
-    """Wrapper for OpenAI completions with full audit trail."""
+    """Wrapper pour les completions OpenAI avec trail d'audit complet."""
     
     def __init__(self, completions, tracer):
         self._completions = completions
         self._tracer = tracer
 
     def create(self, **kwargs):
-        """Intercept and log completion creation."""
+        """Intercepte et enregistre la création de completion."""
         start_time = time.time()
         
         try:
-            # Call original API
+            # Appel de l'API originale
             response = self._completions.create(**kwargs)
             
-            # Calculate latency
+            # Calcul de la latence
             latency_ms = (time.time() - start_time) * 1000
             
-            # Log interaction
+            # Enregistrement de l'interaction
             self._tracer.log_llm_interaction(
                 provider="openai",
                 model=kwargs.get("model", "unknown"),
                 messages=kwargs.get("messages", []),
-                response=response.model_dump() if hasattr(response, 'model_dump') else dict(response),
+                response=response,
                 metadata={"latency_ms": latency_ms}
             )
             
             return response
             
         except Exception as e:
-            # Log error
+            # Enregistrement de l'erreur
             self._tracer.log_event("llm_error", {
                 "provider": "openai",
                 "model": kwargs.get("model", "unknown"),
                 "error": str(e),
+                "error_type": type(e).__name__,
                 "latency_ms": (time.time() - start_time) * 1000
             })
             raise
