@@ -1,0 +1,20 @@
+LLMAuditTrail: Cryptographic audit framework for LLM agents.
+
+This package provides cryptographic audit trails for LLM autonomous agents
+in regulated environments, focusing on compliance and tamper-proof logging.
+
+Author: David Hassoun
+Email: davidhassoun@protonmail.com
+"""
+
+from .audit_tracer import AuditTracer
+from .crypto_engine import CryptoEngine
+from .replay_engine import ReplayEngine
+from .compliance_manager import ComplianceManager
+
+version = "0.1.0"
+author = "David Hassoun"
+email = "davidhassoun@protonmail.com"
+license = "MIT"
+
+all = ["AuditTracer", "CryptoEngine", "ReplayEngine", "ComplianceManager"]
