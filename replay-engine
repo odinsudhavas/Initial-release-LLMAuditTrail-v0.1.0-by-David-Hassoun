@@ -1,0 +1,163 @@
+"""
+Replay engine for audit trail analysis.
+This module provides session replay and analysis capabilities
+for LLM agent audit trails.
+Author: David Hassoun
+Copyright (c) 2025 David Hassoun
+"""
+import json
+from typing import Dict, Any, List, Iterator, Optional
+class ReplayEngine:
+"""Engine for replaying and analyzing audit sessions."""
+def __init__(self, events: List[Dict], crypto_engine):
+"""
+Initialize replay engine with event data.
+Args:
+events: List of audit events
+crypto_engine: CryptoEngine instance for verification
+"""
+self.events = sorted(events, key=lambda x: x['timestamp'])
+self.crypto_engine = crypto_engine
+self.current_index = 0
+def step_through(self) -> Iterator[Dict[str, Any]]:
+"""
+Step through events chronologically.
+Yields:
+Event dictionaries in temporal order
+"""
+for event in self.events:
+# Parse data if stored as JSON string
+if isinstance(event.get('data'), str):
+try:
+event['data'] = json.loads(event['data'])
+except json.JSONDecodeError:
+pass
+yield event
+def get_decision_timeline(self) -> List[Dict[str, Any]]:
+"""
+Extract decision timeline from events.
+Returns:
+List of decision events with timestamps
+"""
+decisions = []
+for event in self.events:
+if event['event_type'] == 'llm_interaction':
+# Parse data if needed
+data = event['data']
+if isinstance(data, str):
+try:
+data = json.loads(data)
+except json.JSONDecodeError:
+continue
+decisions.append({
+"timestamp": event['timestamp'],
+"event_id": event['event_id'],
+"model": data.get('model', 'unknown'),
+"token_usage": data.get('token_usage', {}),
+"latency_ms": data.get('latency_ms', 0),
+"messages_count": len(data.get('messages', [])),
+"response_length": len(str(data.get('response', '')))
+})
+return decisions
+def calculate_session_metrics(self) -> Dict[str, Any]:
+"""
+Calculate session performance metrics.
+Returns:
+Dictionary with session metrics
+"""
+if not self.events:
+return {"error": "No events to analyze"}
+llm_interactions = [e for e in self.events if e['event_type'] == 'llm_interaction']
+# Calculate basic metrics
+total_events = len(self.events)
+total_interactions = len(llm_interactions)
+if llm_interactions:
+start_time = min(e['timestamp'] for e in self.events)
+end_time = max(e['timestamp'] for e in self.events)
+session_duration = end_time - start_time
+# Parse interaction data for advanced metrics
+latencies = []
+token_counts = []
+for interaction in llm_interactions:
+data = interaction['data']
+if isinstance(data, str):
+try:
+data = json.loads(data)
+except json.JSONDecodeError:
+continue
+latencies.append(data.get('latency_ms', 0))
+token_usage = data.get('token_usage', {})
+if isinstance(token_usage, dict):
+token_counts.append(token_usage.get('total_tokens', 0))
+avg_latency = sum(latencies) / len(latencies) if latencies else 0
+total_tokens = sum(token_counts)
+else:
+session_duration = 0
+avg_latency = 0
+total_tokens = 0
+return {
+"session_metrics": {
+"total_events": total_events,
+"llm_interactions": total_interactions,
+"session_duration_seconds": session_duration,
+"average_latency_ms": avg_latency,
+"total_tokens_used": total_tokens,
+"events_per_minute": (total_events / (session_duration / 60)) if session_dura
+},
+"integrity_status": {
+"all_events_verified": self._verify_all_events(),
+"framework_author": "David Hassoun",
+"analysis_version": "0.1.0"
+}
+}
+def _verify_all_events(self) -> bool:
+"""
+Verify cryptographic integrity of all events.
+Returns:
+True if all events are valid, False otherwise
+"""
+for event in self.events:
+# Reconstruct event without hash
+event_data = {
+"event_id": event["event_id"],
+"session_id": event["session_id"],
+"timestamp": event["timestamp"],
+"event_type": event["event_type"],
+"data": json.loads(event["data"]) if isinstance(event["data"], str) else even
+}
+if not self.crypto_engine.verify_event_hash(event_data, event["hash"]):
+return False
+return True
+def find_anomalies(self) -> List[Dict[str, Any]]:
+"""
+Detect potential anomalies in the session.
+Returns:
+List of detected anomalies
+"""
+anomalies = []
+# Check for unusual latency patterns
+llm_interactions = [e for e in self.events if e['event_type'] == 'llm_interaction']
+if len(llm_interactions) > 3:
+latencies = []
+for interaction in llm_interactions:
+data = interaction['data']
+if isinstance(data, str):
+try:
+data = json.loads(data)
+except json.JSONDecodeError:
+continue
+latencies.append(data.get('latency_ms', 0))
+if latencies:
+avg_latency = sum(latencies) / len(latencies)
+threshold = avg_latency * 3 # 3x average
+for i, interaction in enumerate(llm_interactions):
+if latencies[i] > threshold:
+anomalies.append({
+"type": "high_latency",
+"event_id": interaction["event_id"],
+"timestamp": interaction["timestamp"],
+"latency_ms": latencies[i],
+"threshold_ms": threshold,
+"description": f"Latency {latencies[i]:.1f}ms exceeds threshold {
+})
+return anomalies
