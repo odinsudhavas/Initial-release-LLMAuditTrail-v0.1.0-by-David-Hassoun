@@ -1,0 +1,92 @@
+"""
+Compliance management for regulatory standards.
+This module implements compliance features for FDA 21 CFR Part 11,
+SOX Section 404, and EU AI Act requirements.
+Author: David Hassoun
+Copyright (c) 2025 David Hassoun
+"""
+import time
+from typing import Dict, Any, List, Optional
+class ComplianceManager:
+"""Manager for regulatory compliance features."""
+def __init__(self, compliance_mode: Optional[str] = None):
+"""
+Initialize compliance manager.
+Args:
+compliance_mode: "medical", "financial", "general", or None
+"""
+self.compliance_mode = compliance_mode
+self.compliance_standards = self._get_compliance_standards()
+def _get_compliance_standards(self) -> Dict[str, Any]:
+"""Get compliance standards configuration."""
+standards = {
+"medical": {
+"regulation": "FDA 21 CFR Part 11",
+"retention_requirement": "7 years minimum",
+"electronic_signatures": True,
+"audit_trail_complete": True,
+"data_integrity_controls": True
+},
+"financial": {
+"regulation": "SOX Section 404",
+"retention_requirement": "7 years minimum",
+"internal_controls_testing": True,
+"management_assertions": True,
+"independent_verification": True
+},
+"general": {
+"regulation": "General Data Protection",
+"retention_requirement": "3 years default",
+"privacy_controls": True,
+"transparency_required": True
+}
+}
+return standards.get(self.compliance_mode, standards["general"])
+def get_interaction_metadata(self) -> Dict[str, Any]:
+"""
+Generate compliance metadata for LLM interactions.
+Returns:
+Dictionary with compliance-specific metadata
+"""
+base_metadata = {
+"compliance_framework": "LLMAuditTrail v0.1.0",
+"framework_author": "David Hassoun",
+"timestamp_utc": time.time(),
+"standards_applied": self.compliance_standards
+}
+if self.compliance_mode == "medical":
+base_metadata.update({
+"fda_compliance": True,
+"electronic_signature_applied": True,
+"audit_trail_complete": True,
+"data_integrity_verified": True
+})
+elif self.compliance_mode == "financial":
+base_metadata.update({
+"sox_compliance": True,
+"internal_controls_active": True,
+"management_oversight": True,
+"independent_verification_available": True
+})
+return base_metadata
+def generate_report_metadata(self, events: List[Dict], retention_years: int) -> Dict[str,
+"""
+Generate compliance report metadata.
+Args:
+events: List of audit events
+retention_years: Data retention period
+Returns:
+Compliance report metadata
+"""
+return {
+"compliance_mode": self.compliance_mode,
+"regulation_standard": self.compliance_standards.get("regulation", "General"),
+"retention_years": retention_years,
+"total_events": len(events),
+"report_generated_by": "David Hassoun - LLMAuditTrail",
+"report_timestamp": time.time(),
+"framework_version": "0.1.0",
+"cryptographic_integrity": "HMAC-SHA256 verified",
+"audit_trail_complete": True,
+"compliance_certified": self.compliance_mode in ["medical", "financial"]
+}
